@@ -6,21 +6,24 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
-	"sync"
+	"os"
 	"time"
 )
 
 func getIDs() (ids []int, err error) {
 	resp, err := http.Get("http://localhost:9874/people/ids")
 	if err != nil {
-		return nil, fmt.Errorf("error fetching ids: %v", err)
+		return nil, fmt.Errorf("error fetching IDs: %v", err)
 	}
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("error reading response body: %v", err)
+		return nil, fmt.Errorf("error reading IDs: %v", err)
 	}
 	err = json.Unmarshal(body, &ids)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing IDs: %v", err)
+	}
 	return
 }
 
@@ -30,16 +33,21 @@ func getPerson(id int) (person, error) {
 	if err != nil {
 		return person{}, fmt.Errorf("error fetching person: %v", err)
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return person{}, fmt.Errorf("error fetching URL (%s) return status code %d", url, resp.StatusCode)
+		return person{}, fmt.Errorf("status code is not 200: %v", resp.StatusCode)
 	}
+	defer resp.Body.Close()
 	var p person
 	err = json.NewDecoder(resp.Body).Decode(&p)
 	if err != nil {
 		return person{}, fmt.Errorf("error parsing person: %v", err)
 	}
 	return p, nil
+}
+
+func getPersonChannel(id int, ch chan<- person) {
+	p, _ := getPerson(id)
+	ch <- p
 }
 
 type person struct {
@@ -52,6 +60,9 @@ type person struct {
 }
 
 func (p person) String() string {
+	if p.FormatString != "" {
+		return fmt.Sprintf("%s %s", p.FamilyName, p.GivenName)
+	}
 	return fmt.Sprintf("%s %s", p.GivenName, p.FamilyName)
 }
 
@@ -59,32 +70,28 @@ func main() {
 	start := time.Now()
 	ids, err := getIDs()
 	if err != nil {
-		log.Fatalf("getIDs failed: %v", err)
+		log.Fatalf("getIDs failed: %v\n", err)
 	}
 	fmt.Println(ids)
 
-	var wg sync.WaitGroup
-	ch := make(chan person, 10)
-	for _, n := range ids {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			p, err := getPerson(id)
+	if len(os.Args) > 1 && os.Args[1] == "noasync" {
+		for _, n := range ids {
+			p, err := getPerson(n)
 			if err != nil {
-				log.Printf("%d: %v\n", id, err)
-				return
+				fmt.Printf("ID %d: %v\n", n, err)
+				continue
 			}
-			ch <- p
-		}(n)
-	}
-
-	go func() {
-		wg.Wait()
-		close(ch)
-	}()
-
-	for p := range ch {
-		fmt.Printf("%d: %v\n", p.ID, p)
+			fmt.Printf("%d: %v\n", p.ID, p)
+		}
+	} else {
+		ch := make(chan person)
+		for _, n := range ids {
+			go getPersonChannel(n, ch)
+		}
+		for range ids {
+			p := <-ch
+			fmt.Printf("%d: %v\n", p.ID, p)
+		}
 	}
 
 	elapsed := time.Since(start)
